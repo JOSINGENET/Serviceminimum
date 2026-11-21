@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Service Minimum - didacticiel : comment travaille l'ordinateur</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --fond:#030a12; --trait:#5fe3ff; --trait2:#1b6f8a; --texte:#cfefff; --faible:#6a93a8; --ok:#59e39a; --attention:#ffc857; --alerte:#ff5d5d; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--fond); color:var(--texte); font-family:"Segoe UI", Arial, sans-serif; overflow:hidden; }
+  body { background:radial-gradient(ellipse at 50% 40%, #0a2233 0%, #030a12 65%, #010409 100%); display:flex; flex-direction:column; }
+  header { padding:10px 18px; border-bottom:1px solid rgba(95,227,255,.25); display:flex; align-items:baseline; gap:16px; }
+  header .titre { font-size:17px; letter-spacing:.28em; text-transform:uppercase; color:var(--trait); }
+  header .sous { font-size:12px; color:var(--faible); }
+  #barre { padding:8px 18px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; border-bottom:1px solid rgba(95,227,255,.14); }
+  button { background:rgba(95,227,255,.08); color:var(--texte); border:1px solid rgba(95,227,255,.4); border-radius:3px; padding:7px 13px; font:inherit; font-size:12px; letter-spacing:.04em; cursor:pointer; }
+  button:hover { background:rgba(95,227,255,.2); }
+  button.actif { background:rgba(95,227,255,.3); color:#fff; border-color:var(--trait); }
+  #corps { flex:1; display:flex; min-height:0; }
+  #scene { flex:1; min-width:0; display:block; }
+  #cote { width:340px; border-left:1px solid rgba(95,227,255,.2); padding:14px 16px; overflow-y:auto; font-size:13px; line-height:1.5; scrollbar-width:thin; scrollbar-color:var(--trait2) transparent; }
+  #cote h2 { font-size:12px; letter-spacing:.18em; text-transform:uppercase; color:var(--trait); margin:0 0 8px; }
+  #cote h3 { font-size:13px; color:#fff; margin:16px 0 4px; }
+  #cote .goulot { color:var(--alerte); font-weight:600; }
+  #cote p { margin:6px 0; color:var(--texte); }
+  #cote .d { color:var(--faible); font-size:12px; }
+  .etape { padding:5px 8px; margin:4px 0; border-left:3px solid var(--trait2); background:rgba(95,227,255,.04); }
+  .etape.active { border-left-color:var(--trait); background:rgba(95,227,255,.14); }
+  .leg { display:flex; align-items:center; gap:8px; margin:4px 0; font-size:12px; color:var(--faible); }
+  .pastille { width:26px; height:6px; border-radius:3px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="titre">Service Minimum</div>
+  <div class="sous">Didacticiel - comment l'ordinateur répartit le travail entre le processeur, la mémoire et le stockage</div>
+</header>
+<div id="barre">
+  <span style="color:var(--faible);font-size:12px;letter-spacing:.1em;">EXEMPLE :</span>
+  <button data-sc="repos">Au repos</button>
+  <button data-sc="texte">Traitement de texte</button>
+  <button data-sc="web">Navigation web</button>
+  <button data-sc="calcul" class="actif">Calcul (tableur, note de calcul)</button>
+  <button data-sc="video">Vidéo (lecture / montage)</button>
+  <span style="flex:1"></span>
+  <button id="btn-plein">Plein écran</button>
+</div>
+<div id="corps">
+  <canvas id="scene"></canvas>
+  <div id="cote">
+    <h2>Ce qui se passe</h2>
+    <div id="texte-sc"></div>
+    <h3>Déroulé</h3>
+    <div id="etapes"></div>
+    <h3>Repères de débit</h3>
+    <div class="leg"><span class="pastille" style="background:var(--ok)"></span> rapide (dans le processeur / mémoire)</div>
+    <div class="leg"><span class="pastille" style="background:var(--attention)"></span> moyen (disque SSD)</div>
+    <div class="leg"><span class="pastille" style="background:var(--alerte)"></span> lent - souvent le goulot (disque dur, réseau)</div>
+    <p class="d" style="margin-top:12px">Un <b>bus</b> est le câble qui relie deux organes ; sa largeur sur le schéma représente son débit. Le <b class="goulot">goulot d'étranglement</b> est l'organe ou le bus le plus lent sur le chemin utilisé : c'est lui qui fixe la vitesse de l'ensemble, comme le maillon le plus faible d'une chaîne.</p>
+  </div>
+</div>
+
+<script>
+"use strict";
+const scene = document.getElementById("scene");
+const ctx = scene.getContext("2d");
+let L = 0, H = 0, ECH = 1, ox = 0, oy = 0;
+const LARG = 1120, HAUT = 680; // repère logique
+
+// ------------------------------------------------------------------ organes
+const N = {
+  user:  { x: 90,  y: 340, w: 120, h: 80,  t: "Utilisateur", s: "clavier, souris", c: "#8aa0b0" },
+  cpu:   { x: 470, y: 150, w: 180, h: 150, t: "Processeur (CPU)", s: "exécute les calculs", c: "#5fe3ff" },
+  cache: { x: 470, y: 60,  w: 180, h: 54,  t: "Cache L1/L2/L3", s: "mémoire ultra-rapide du CPU", c: "#7fe3b0" },
+  ram:   { x: 760, y: 150, w: 170, h: 120, t: "Mémoire vive (RAM)", s: "travail en cours - volatile", c: "#9fd0ff" },
+  gpu:   { x: 470, y: 380, w: 180, h: 110, t: "Carte graphique (GPU)", s: "image, vidéo, écran", c: "#c9a7ff" },
+  rom:   { x: 760, y: 310, w: 170, h: 70,  t: "ROM / UEFI-BIOS", s: "mémoire morte - démarrage", c: "#b0b8c0" },
+  disk:  { x: 760, y: 430, w: 170, h: 90,  t: "Disque (SSD / HDD)", s: "stockage permanent", c: "#ffc857" },
+  net:   { x: 760, y: 560, w: 170, h: 80,  t: "Carte réseau", s: "Internet, réseau local", c: "#ff9bb0" },
+  ecran: { x: 210, y: 400, w: 120, h: 80,  t: "Écran", s: "", c: "#c9a7ff" }
+};
+// ------------------------------------------------------------------ bus (lien a<->b, débit Go/s indicatif)
+const BUS = [
+  { a: "cache", b: "cpu", go: 2000, lib: "" },
+  { a: "cpu", b: "ram", go: 40, lib: "bus mémoire ~40 Go/s" },
+  { a: "cpu", b: "gpu", go: 16, lib: "PCIe ~16 Go/s" },
+  { a: "ram", b: "gpu", go: 16, lib: "" },
+  { a: "ram", b: "rom", go: 1, lib: "" },
+  { a: "cpu", b: "disk", go: 3.5, lib: "NVMe ~3,5 Go/s (SSD) · HDD ~0,15" },
+  { a: "ram", b: "disk", go: 3.5, lib: "" },
+  { a: "cpu", b: "net", go: 0.1, lib: "réseau ~0,1 Go/s" },
+  { a: "ram", b: "net", go: 0.1, lib: "" },
+  { a: "user", b: "cpu", go: 0.001, lib: "" },
+  { a: "gpu", b: "ecran", go: 20, lib: "" },
+  { a: "user", b: "ecran", go: 0, lib: "" }
+];
+function busEntre(a, b) { return BUS.find(x => (x.a === a && x.b === b) || (x.a === b && x.b === a)); }
+
+// ------------------------------------------------------------------ scénarios
+// charge : 0..1 par organe ; flux : [a,b,intensité 0..1] ; goulot : clé organe ou "a-b"
+const SC = {
+  repos: {
+    titre: "Au repos",
+    charge: { cpu: .04, ram: .25, gpu: .03, disk: .02, net: .02, cache: .1 },
+    flux: [["cpu", "ram", .12], ["cpu", "disk", .05]],
+    goulot: null,
+    texte: "Rien de lourd ne tourne. Le processeur est presque inactif, la mémoire vive garde Windows et les programmes ouverts. Quelques petits accès au disque et au réseau en fond (mises à jour, synchronisation). <b>C'est l'état que Service Minimum cherche à préserver</b> : moins de services inutiles = moins d'agitation au repos.",
+    etapes: ["Windows et les programmes ouverts occupent la RAM", "Le CPU se réveille brièvement pour les tâches de fond", "Aucun organe n'est saturé : pas de goulot"]
+  },
+  texte: {
+    titre: "Traitement de texte",
+    charge: { cpu: .08, ram: .35, gpu: .05, disk: .03, net: .01, cache: .2 },
+    flux: [["user", "cpu", 1], ["cpu", "ram", .2], ["cpu", "gpu", .15], ["gpu", "ecran", .2], ["cpu", "disk", .05]],
+    goulot: "user",
+    texte: "Écrire sollicite très peu la machine. Chaque frappe part du clavier vers le CPU, le document vit dans la RAM, l'affichage passe par le GPU. Les débits demandés sont minuscules. <b class='goulot'>Le facteur limitant, c'est vous</b> (la vitesse de frappe) : aucun organe n'est en peine. Inutile de viser une machine puissante pour cet usage.",
+    etapes: ["La frappe arrive du clavier au processeur", "Le document est modifié en mémoire vive (RAM)", "Le CPU demande au GPU d'afficher le texte", "Sauvegarde ponctuelle sur le disque", "Goulot : la vitesse de frappe, pas le matériel"]
+  },
+  web: {
+    titre: "Navigation web",
+    charge: { cpu: .45, ram: .55, gpu: .35, disk: .1, net: 1, cache: .5 },
+    flux: [["net", "ram", 1], ["ram", "cpu", .6], ["cpu", "gpu", .5], ["gpu", "ecran", .6], ["cpu", "disk", .15]],
+    goulot: "net",
+    texte: "Une page web arrive d'Internet par la carte réseau, est stockée en RAM, puis le CPU interprète le code (HTML, scripts) et le GPU dessine la page. Le CPU et la RAM montent avec les onglets et les scripts, mais <b class='goulot'>le goulot est presque toujours le réseau</b> : le débit d'Internet est très inférieur à celui des bus internes. D'où l'intérêt de limiter onglets et extensions.",
+    etapes: ["La page descend d'Internet via la carte réseau", "Elle est reçue et assemblée en mémoire vive", "Le CPU interprète le HTML et les scripts", "Le GPU compose l'image affichée", "Goulot : le débit du réseau / d'Internet"]
+  },
+  calcul: {
+    titre: "Calcul (tableur, note de calcul de structure)",
+    charge: { cpu: 1, ram: .8, gpu: .1, disk: .2, net: .02, cache: .95 },
+    flux: [["ram", "cache", 1], ["cache", "cpu", 1], ["cpu", "ram", .8], ["cpu", "disk", .1]],
+    goulot: "cpu",
+    texte: "Un gros calcul (grande feuille de calcul, matrice d'éléments finis) enchaîne les opérations dans le CPU. Les données vont et viennent entre la RAM et le cache du processeur. Tant que le jeu de données tient dans le cache, tout vole ; au-delà, le CPU attend la RAM. <b class='goulot'>Le goulot est le processeur</b> (nombre de cœurs et fréquence), parfois la RAM si le calcul dépasse sa capacité (recours au disque = effondrement).",
+    etapes: ["Les données sont chargées de la RAM vers le cache", "Le CPU calcule à pleine charge, cœurs saturés", "Les résultats repartent en mémoire vive", "Écriture du fichier résultat sur le disque", "Goulot : le processeur (et la RAM si saturée)"]
+  },
+  video: {
+    titre: "Vidéo (lecture ou montage)",
+    charge: { cpu: .5, ram: .6, gpu: .9, disk: .85, net: .05, cache: .4 },
+    flux: [["disk", "ram", 1], ["ram", "cpu", .5], ["cpu", "gpu", .9], ["gpu", "ecran", 1]],
+    goulot: "disk",
+    texte: "La vidéo est lue sur le disque, chargée en RAM, décodée par le CPU puis surtout par le GPU qui produit les images. Le GPU travaille dur. <b class='goulot'>Sur un disque dur (HDD), le goulot est le disque</b> : il ne suit pas le débit vidéo (saccades). Avec un SSD, le goulot repasse sur le GPU/CPU. Le montage ajoute de gros allers-retours disque ↔ RAM.",
+    etapes: ["Les images sont lues sur le disque", "Elles transitent par la mémoire vive", "Le CPU puis le GPU décodent et composent", "Le GPU envoie le flux à l'écran", "Goulot : le disque (si HDD), sinon le GPU"]
+  }
+};
+
+let scActuel = "calcul";
+let t0 = performance.now();
+let paquets = [];
+
+function centre(n) { const o = N[n]; return { x: o.x + o.w / 2, y: o.y + o.h / 2 }; }
+function couleurBus(go) { return go >= 15 ? "#59e39a" : go >= 1 ? "#ffc857" : "#ff5d5d"; }
+
+function dimensionner() {
+  const dpr = window.devicePixelRatio || 1;
+  L = scene.clientWidth; H = scene.clientHeight;
+  scene.width = Math.round(L * dpr); scene.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ECH = Math.min(L / LARG, H / HAUT);
+  ox = (L - LARG * ECH) / 2; oy = (H - HAUT * ECH) / 2;
+}
+function X(x) { return ox + x * ECH; }
+function Y(y) { return oy + y * ECH; }
+function S(v) { return v * ECH; }
+
+function choisir(sc) {
+  scActuel = sc;
+  for (const b of document.querySelectorAll("#barre button[data-sc]")) b.classList.toggle("actif", b.dataset.sc === sc);
+  const d = SC[sc];
+  document.getElementById("texte-sc").innerHTML = "<p>" + d.texte + "</p>";
+  document.getElementById("etapes").innerHTML = d.etapes.map((e, i) => '<div class="etape" data-i="' + i + '">' + (i + 1) + ". " + e + "</div>").join("");
+  // paquets animés selon les flux
+  paquets = [];
+  for (const [a, b, inten] of d.flux) {
+    const n = Math.max(1, Math.round(inten * 6));
+    for (let k = 0; k < n; k++) paquets.push({ a, b, p: k / n, v: 0.25 + inten * 0.75 });
+  }
+}
+
+function fleche(ca, cb, actif, go, largeurBase) {
+  ctx.strokeStyle = actif ? couleurBus(go) : "rgba(95,227,255,.14)";
+  ctx.lineWidth = actif ? S(2 + largeurBase * 4) : S(1.5);
+  if (actif) { ctx.shadowColor = couleurBus(go); ctx.shadowBlur = 8; }
+  ctx.beginPath(); ctx.moveTo(X(ca.x), Y(ca.y)); ctx.lineTo(X(cb.x), Y(cb.y)); ctx.stroke();
+  ctx.shadowBlur = 0;
+}
+
+function organe(cle, d) {
+  const o = N[cle];
+  const charge = (d.charge[cle] != null) ? d.charge[cle] : 0;
+  const goulot = (d.goulot === cle);
+  const x = X(o.x), y = Y(o.y), w = S(o.w), h = S(o.h);
+  const r = S(8);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  const g = ctx.createLinearGradient(x, y, x, y + h);
+  g.addColorStop(0, "rgba(10,34,50,.85)"); g.addColorStop(1, "rgba(5,16,26,.9)");
+  ctx.fillStyle = g; ctx.fill();
+  ctx.lineWidth = goulot ? S(2.5) : S(1.2);
+  ctx.strokeStyle = goulot ? "#ff5d5d" : o.c;
+  if (goulot) { const pouls = 0.5 + 0.5 * Math.sin((performance.now() - t0) / 300); ctx.shadowColor = "#ff5d5d"; ctx.shadowBlur = S(6 + pouls * 14); }
+  ctx.stroke(); ctx.shadowBlur = 0;
+  // titre
+  ctx.fillStyle = "#eaf7ff"; ctx.textAlign = "center";
+  ctx.font = "600 " + S(14) + "px Segoe UI, Arial";
+  ctx.fillText(o.t, x + w / 2, y + S(22));
+  if (o.s) { ctx.fillStyle = "#6a93a8"; ctx.font = S(11) + "px Segoe UI, Arial"; ctx.fillText(o.s, x + w / 2, y + S(38)); }
+  // barre de charge
+  if (d.charge[cle] != null) {
+    const by = y + h - S(18), bx = x + S(12), bw = w - S(24), bh = S(8);
+    ctx.fillStyle = "rgba(95,227,255,.12)"; ctx.fillRect(bx, by, bw, bh);
+    const col = charge >= .85 ? "#ff5d5d" : charge >= .6 ? "#ffc857" : "#59e39a";
+    ctx.fillStyle = col; ctx.fillRect(bx, by, bw * charge, bh);
+    ctx.fillStyle = "#cfefff"; ctx.textAlign = "right"; ctx.font = S(10) + "px Segoe UI, Arial";
+    ctx.fillText(Math.round(charge * 100) + " %", x + w - S(12), by - S(3));
+    ctx.textAlign = "center";
+  }
+  if (goulot) {
+    ctx.fillStyle = "#ff5d5d"; ctx.font = "600 " + S(11) + "px Segoe UI, Arial";
+    ctx.fillText("◤ GOULOT ◢", x + w / 2, y - S(6));
+  }
+}
+
+function dessiner() {
+  const d = SC[scActuel];
+  ctx.clearRect(0, 0, L, H);
+  const actifs = new Set();
+  for (const [a, b] of d.flux) { actifs.add(a + "|" + b); actifs.add(b + "|" + a); }
+  // bus
+  for (const bus of BUS) {
+    const actif = actifs.has(bus.a + "|" + bus.b);
+    const inten = actif ? (d.flux.find(f => (f[0] === bus.a && f[1] === bus.b) || (f[0] === bus.b && f[1] === bus.a)) || [0, 0, .3])[2] : 0;
+    fleche(centre(bus.a), centre(bus.b), actif, bus.go, inten);
+    if (actif && bus.lib) {
+      const c1 = centre(bus.a), c2 = centre(bus.b);
+      ctx.fillStyle = "rgba(207,239,255,.7)"; ctx.font = S(10) + "px Segoe UI, Arial"; ctx.textAlign = "center";
+      ctx.fillText(bus.lib, X((c1.x + c2.x) / 2), Y((c1.y + c2.y) / 2) - S(6));
+    }
+  }
+  // paquets (données qui circulent)
+  const now = performance.now();
+  for (const pk of paquets) {
+    pk.p += (now - (pk.last || now)) / 1000 * 0.35 * pk.v; pk.last = now;
+    if (pk.p > 1) pk.p -= 1;
+    const ca = centre(pk.a), cb = centre(pk.b);
+    const bus = busEntre(pk.a, pk.b);
+    const x = X(ca.x + (cb.x - ca.x) * pk.p), y = Y(ca.y + (cb.y - ca.y) * pk.p);
+    const col = bus ? couleurBus(bus.go) : "#5fe3ff";
+    const halo = ctx.createRadialGradient(x, y, 0, x, y, S(7));
+    halo.addColorStop(0, "#ffffff"); halo.addColorStop(.4, col); halo.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = halo; ctx.beginPath(); ctx.arc(x, y, S(7), 0, 7); ctx.fill();
+  }
+  // organes
+  for (const cle in N) organe(cle, d);
+  // mise en évidence de l'étape courante (cyclique)
+  const nb = d.etapes.length;
+  const et = Math.floor(((now - t0) / 1600) % nb);
+  for (const el of document.querySelectorAll("#etapes .etape")) el.classList.toggle("active", Number(el.dataset.i) === et);
+  requestAnimationFrame(dessiner);
+}
+
+for (const b of document.querySelectorAll("#barre button[data-sc]")) b.addEventListener("click", () => choisir(b.dataset.sc));
+document.getElementById("btn-plein").addEventListener("click", () => { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen(); });
+window.addEventListener("resize", dimensionner);
+dimensionner();
+choisir("calcul");
+requestAnimationFrame(dessiner);
+</script>
+</body>
+</html>

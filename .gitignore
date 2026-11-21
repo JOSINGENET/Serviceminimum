@@ -1,0 +1,6 @@
+# Donnees propres a chaque poste (inventaires, releves, configurations, journaux)
+donnees/
+# Copies de travail locales
+sauvegardes/
+# Sortie de compilation
+dist/

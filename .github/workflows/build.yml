@@ -1,0 +1,55 @@
+name: Compilation
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  compiler:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verifier la syntaxe PowerShell
+        shell: powershell
+        run: |
+          $jetons = $null
+          $erreurs = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'ServiceMinimum.ps1'), [ref]$jetons, [ref]$erreurs)
+          if ($erreurs.Count -gt 0) {
+            foreach ($e in $erreurs) { Write-Host ('Ligne {0}, colonne {1} : {2}' -f $e.Extent.StartLineNumber, $e.Extent.StartColumnNumber, $e.Message) }
+            exit 1
+          }
+          Write-Host 'Syntaxe correcte'
+
+      - name: Compiler l'executable (ps2exe)
+        shell: powershell
+        run: |
+          Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force | Out-Null
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module -Name ps2exe -Scope CurrentUser -Force
+          $texte = Get-Content -Raw -Encoding UTF8 'ServiceMinimum.ps1'
+          $version = [regex]::Match($texte, '\$VersionApp = ''([0-9.]+)''').Groups[1].Value
+          Write-Host ('Version ' + $version)
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Invoke-ps2exe -inputFile 'ServiceMinimum.ps1' -outputFile 'dist\ServiceMinimum.exe' -noConsole -noOutput -noError -title 'Service Minimum' -product 'Service Minimum' -company 'INGENET' -description 'Inventaire et optimisation des services Windows' -version ($version + '.0')
+          if (-not (Test-Path 'dist\ServiceMinimum.exe')) { throw 'Compilation echouee' }
+          Copy-Item 'tableau-de-bord.html', 'didacticiel.html', 'README.md' -Destination 'dist'
+          Compress-Archive -Path 'dist\*' -DestinationPath 'ServiceMinimum.zip' -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ServiceMinimum
+          path: ServiceMinimum.zip
+
+      - name: Publier la version
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ServiceMinimum.zip
+          generate_release_notes: true
