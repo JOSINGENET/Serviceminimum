@@ -16,6 +16,8 @@ rem Premier envoi depuis ce poste : reprend l historique deja publie sans touche
 git symbolic-ref HEAD refs/heads/main
 git update-ref refs/heads/main refs/remotes/origin/main
 git reset -q
+rem Recupere les fichiers publies absents du dossier (compilation automatique)
+git checkout -q -- .github
 :suite
 git add -A
 git diff --cached --quiet
