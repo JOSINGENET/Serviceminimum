@@ -829,6 +829,28 @@ function Test-ServiceLieApplication($s) {
     return $false
 }
 
+# Services dont une application a besoin sans que leur dossier d'installation le montre
+# (motif cherche dans le nom des applications utilisees | services proteges de la reduction)
+$LiensConnusTexte = @'
+docker|WSLService,vmms,vmcompute,HvHost,hns,nvagent,iphlpsvc,com.docker.service
+claude|vmms,vmcompute,HvHost,hns
+wsl|WSLService,vmcompute,HvHost,hns
+'@
+
+function Get-ServicesProtegesParUsage {
+    # Noms des services a ne pas proposer parce qu'une application utilisee en depend (liens connus)
+    $proteges = @{}
+    $apps = @($script:HistoApps.Values | ForEach-Object { ('{0} {1}' -f $_.Nom, $_.Produit).ToLower() })
+    foreach ($ligne in ($LiensConnusTexte -split "`r?`n")) {
+        $parts = $ligne.Split('|')
+        if ($parts.Count -lt 2 -or -not $parts[0]) { continue }
+        $motif = $parts[0].ToLower()
+        if (@($apps | Where-Object { $_.Contains($motif) }).Count -eq 0) { continue }
+        foreach ($n in $parts[1].Split(',')) { if ($n.Trim()) { $proteges[$n.Trim().ToLower()] = $motif } }
+    }
+    return $proteges
+}
+
 function Get-TauxActiviteService($s) {
     # Part des releves ou le service etait actif ; -1 si l'historique est trop court
     if (-not $script:HistoSvc) { return -1 }
@@ -848,33 +870,49 @@ function New-ChangementReduction($s, [string]$cible) {
 }
 
 function Get-PaliersReduction {
-    # Retourne les paliers qui ont encore des services a proposer, du moins risque au plus risque
+    # Retourne les paliers qui ont encore des services a proposer, du moins risque au plus risque.
+    # Un service n'apparait que dans un seul palier (le premier qui le concerne).
     $paliers = New-Object System.Collections.ArrayList
+    $proteges = Get-ServicesProtegesParUsage
     $inv = @($script:Inventaire | Where-Object { $_.Cat -ne 'E' -and $_.Cat -ne 'U' -and $ModeFr.ContainsKey([string]$_.StartMode) -and -not (Test-ServiceSecurite $_) })
-    $auto = @($inv | Where-Object { $_.StartMode -eq 'Auto' })
+    $pris = @{}
 
-    # 1. Inutiles probables pas encore au mode propose par la base de connaissances
-    $c = @($inv | Where-Object { $_.Cat -eq 'I' -and $_.Cible -and $ModeFr.ContainsKey([string]$_.Cible) -and [string]$_.Cible -ne [string]$_.StartMode } | ForEach-Object { New-ChangementReduction $_ ([string]$_.Cible) })
-    if ($c.Count -gt 0) { [void]$paliers.Add((New-PalierReduction 1 'services inutiles probables' 'Services que la base de connaissances classe « inutiles probables » : télémétrie, jeux, fonctions absentes de ce poste. Risque très faible.' $c)) }
+    # 1. Inutiles probables pas encore au mode propose par la base de connaissances.
+    #    Un service inutile probable qui tourne passe d'abord par la veille (jamais de gel direct).
+    $c = New-Object System.Collections.ArrayList
+    foreach ($s in @($inv | Where-Object { $_.Cat -eq 'I' -and $_.Cible -and $ModeFr.ContainsKey([string]$_.Cible) -and [string]$_.Cible -ne [string]$_.StartMode })) {
+        $cible = [string]$s.Cible
+        if ($s.State -eq 'Running') {
+            if ($s.StartMode -ne 'Auto') { continue }
+            $cible = 'Manual'
+        }
+        [void]$c.Add((New-ChangementReduction $s $cible))
+        $pris[[string]$s.Name] = $true
+    }
+    if ($c.Count -gt 0) { [void]$paliers.Add((New-PalierReduction 1 'services inutiles probables' 'Services que la base de connaissances classe « inutiles probables » (télémétrie, jeux, fonctions absentes de ce poste) et qui sont à l''arrêt. Risque très faible.' $c.ToArray())) }
+
+    # Candidats a la mise en veille : automatiques, hors « a garder », non proteges par une application utilisee
+    $auto = @($inv | Where-Object { $_.StartMode -eq 'Auto' -and $_.Cat -ne 'G' -and -not $pris.ContainsKey([string]$_.Name) -and -not $proteges.ContainsKey(([string]$_.Name).ToLower()) })
 
     # 2. Automatiques jamais vus actifs
-    $c = @($auto | Where-Object { $_.Cat -ne 'G' -and $_.State -ne 'Running' -and (Get-TauxActiviteService $_) -eq 0 } | ForEach-Object { New-ChangementReduction $_ 'Manual' })
+    $c = @($auto | Where-Object { $_.State -ne 'Running' -and (Get-TauxActiviteService $_) -eq 0 } | ForEach-Object { New-ChangementReduction $_ 'Manual' })
+    foreach ($x in $c) { $pris[$x.Name] = $true }
     if ($c.Count -gt 0) { [void]$paliers.Add((New-PalierReduction 2 'automatiques jamais actifs' 'Services en démarrage automatique qui n''ont jamais été vus actifs dans l''historique. En veille, ils démarreront seuls si un logiciel en a besoin. Risque très faible.' $c)) }
 
     # 3. Optionnels pour lesquels la base de connaissances propose un mode
-    $c = @($auto | Where-Object { $_.Cat -eq 'O' -and $_.Cible -and $ModeFr.ContainsKey([string]$_.Cible) -and [string]$_.Cible -ne 'Auto' } | ForEach-Object { New-ChangementReduction $_ ([string]$_.Cible) })
+    $c = @($auto | Where-Object { -not $pris.ContainsKey([string]$_.Name) -and $_.Cat -eq 'O' -and $_.Cible -and $ModeFr.ContainsKey([string]$_.Cible) -and [string]$_.Cible -ne 'Auto' } | ForEach-Object { New-ChangementReduction $_ 'Manual' })
+    foreach ($x in $c) { $pris[$x.Name] = $true }
     if ($c.Count -gt 0) { [void]$paliers.Add((New-PalierReduction 3 'services optionnels' 'Services optionnels de Windows (scanner, assistance IPv6, mises à jour de navigateurs...). Risque faible : ils redémarrent à la demande.' $c)) }
 
     # 4. Tiers, non classes et optionnels peu actifs, sans lien avec une application utilisee
-    $reste = @($auto | Where-Object { @('T', 'W', 'O') -contains [string]$_.Cat -and -not (Test-ServiceLieApplication $_) })
+    $reste = @($auto | Where-Object { -not $pris.ContainsKey([string]$_.Name) -and @('T', 'W', 'O') -contains [string]$_.Cat -and -not (Test-ServiceLieApplication $_) })
     $c = @($reste | Where-Object { $t = Get-TauxActiviteService $_; $t -ge 0 -and $t -lt 50 } | ForEach-Object { New-ChangementReduction $_ 'Manual' })
+    foreach ($x in $c) { $pris[$x.Name] = $true }
     if ($c.Count -gt 0) { [void]$paliers.Add((New-PalierReduction 4 'services peu actifs' 'Services de logiciels tiers ou non classés, actifs dans moins d''un relevé sur deux et sans lien avec une application utilisée. Risque faible.' $c)) }
 
     # 5. Essai par lots : ceux qui tournent en permanence sans lien avec une application utilisee
-    $dejaPris = @{}
-    foreach ($x in $c) { $dejaPris[$x.Name] = $true }
-    $c5 = @($reste | Where-Object { -not $dejaPris.ContainsKey([string]$_.Name) } | Sort-Object { [int]$_.MemMo } -Descending | Select-Object -First $ReductionLotEssai | ForEach-Object { New-ChangementReduction $_ 'Manual' })
-    if ($c5.Count -gt 0) { [void]$paliers.Add((New-PalierReduction 5 ('essai de mise en veille (lot de {0} au plus)' -f $ReductionLotEssai) 'Services qui tournent en permanence sans qu''aucune application utilisée ne leur soit rattachée. C''est un ESSAI : après le redémarrage, ceux qui se réveillent seuls sont utiles et restent en veille ; si une fonction manque, les remettre en Automatique (bouton « Restaurer un relevé »). Décocher ceux que vous savez nécessaires. Risque moyen.' $c5)) }
+    $c = @($reste | Where-Object { -not $pris.ContainsKey([string]$_.Name) } | Sort-Object { [int]$_.MemMo } -Descending | Select-Object -First $ReductionLotEssai | ForEach-Object { New-ChangementReduction $_ 'Manual' })
+    if ($c.Count -gt 0) { [void]$paliers.Add((New-PalierReduction 5 ('essai de mise en veille (lot de {0} au plus)' -f $ReductionLotEssai) 'Services qui tournent en permanence sans qu''aucune application utilisée ne leur soit rattachée. C''est un ESSAI : après le redémarrage, ceux qui se réveillent seuls sont utiles et restent en veille ; si une fonction manque, les remettre en Automatique (bouton « Restaurer un relevé »). Décocher ceux que vous savez nécessaires. Risque moyen.' $c)) }
 
     # 6. Gel : en veille depuis la fin de l'observation et jamais reveilles
     $parNom = @{}

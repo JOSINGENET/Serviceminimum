@@ -11,7 +11,7 @@ Inventaire, classement et réduction des services Windows au strict nécessaire.
 - Enregistre plusieurs configurations nommées, les classe de la plus économe à la plus gourmande et permet de les ré-appliquer.
 - N'applique que ce qui est coché, après sauvegarde de l'état antérieur.
 
-### Fonctions ajoutées (versions 1.1 à 1.8)
+### Fonctions ajoutées (versions 1.1 à 1.9)
 
 - **Lancement au démarrage** : case « Lancer au démarrage de Windows » (tâche planifiée à l'ouverture de session, sans demande de confirmation). L'application tourne alors réduite près de l'horloge (icône en forme de bouclier) ; fermer la fenêtre ne l'arrête pas, clic droit sur l'icône > Quitter.
 - **Historique local** : toutes les 5 minutes, relevé des services actifs, des applications ouvertes, des ports en écoute et des connexions établies.
@@ -32,6 +32,7 @@ Inventaire, classement et réduction des services Windows au strict nécessaire.
   - Les éléments suspects, les périphériques en erreur et les nouveaux appareils remontent aussi dans l'onglet « Anomalies ».
 - **Démarrage de Windows** (version 1.8) : onglet « Démarrage de Windows ». Liste tout ce qui se lance au démarrage : clés Run et RunOnce du registre (utilisateur, tous les utilisateurs, 32 bits), dossiers Démarrage, tâches planifiées à l'ouverture de session ou au démarrage de l'ordinateur. Pour chacun : état, éditeur, signature, mémoire utilisée s'il tourne, date d'apparition. Classement Habituel / Inhabituel / Suspect (nouvel élément, commande modifiée, programme introuvable, programme non signé, commande de script qui télécharge ou masque sa fenêtre). Actions : désactiver / activer (même mécanisme que le Gestionnaire des tâches, réversible), ajouter un programme au démarrage, retirer un raccourci du dossier Démarrage (mis de côté, récupérable), ouvrir l'emplacement. Bulle d'alerte à chaque nouveau programme au démarrage. Les composants de sécurité (antivirus) ne sont pas désactivables ici. Les applications du Microsoft Store se règlent dans Paramètres > Applications > Démarrage.
 - **Gestes à la webcam** (version 1.8) : bouton « Gestes » du tableau de bord. Pincer (pouce + index) et bouger : tourner le globe ; deux mains pincées : zoom ; index pointé maintenu sur un bouton ou une connexion : le sélectionner ; main ouverte balayée : globe ou carte ; poing fermé 1 s : réinitialiser la vue. Le suivi des mains (MediaPipe) tourne dans le navigateur : l'image de la webcam n'est envoyée nulle part. La bibliothèque et le modèle sont téléchargés une fois (jsDelivr et Google) puis gardés en cache.
+- **Réduction progressive** (version 1.9) : bouton « Réduction progressive : palier suivant... » de l'onglet « Diagnostic d'optimisation ». L'application réduit les services par paliers, du moins risqué au plus risqué : 1. inutiles probables à l'arrêt ; 2. automatiques jamais vus actifs ; 3. optionnels ; 4. tiers et non classés peu actifs ; 5. essai de mise en veille, par lots de 5, de ceux qui tournent en permanence sans application rattachée ; 6. gel (désactivation) de ceux qui sont restés en veille sans jamais redémarrer. Un palier ne fait que cocher des lignes : rien n'est modifié avant « APPLIQUER LA SÉLECTION ». Chaque passage d'Automatique à Manuel est suivi : après un redémarrage de Windows et 3 jours d'usage, un service qui a redémarré seul est « réveillé » (utile à la demande, il reste en veille), un service jamais réveillé devient candidat au gel. Les essentiels, les « à garder », les antivirus, les services des applications réellement utilisées et ceux dont Docker, WSL ou Claude ont besoin ne sont jamais proposés. La ligne « Réduction progressive » du diagnostic donne l'avancement ; quand plus aucun palier n'a de candidat, l'optimum est atteint.
 - **Arrêts** : arrêt d'un service avec la liste de ceux qui en dépendent, fermeture du programme qui tient un port, blocage d'un port dans le pare-feu Windows (réversible).
 
 Limites : les volumes envoyés et téléchargés sont mesurés sur les connexions TCP IPv4 ouvertes au moment des relevés (une connexion brève entre deux relevés n'est pas comptée) ; les avis « habituel / rare / nouveau » ne sont donnés qu'après une heure de relevés.
@@ -102,6 +103,7 @@ Tout est écrit dans le sous-dossier `donnees`, à côté de l'application. Ce d
 | `historique-wifi.csv` | Réseaux Wi-Fi utilisés et à portée déjà vus |
 | `journal-peripheriques.csv` | Branchements, débranchements, connexions Wi-Fi, désactivations, blocages |
 | `historique-demarrage.csv` | Programmes lancés au démarrage de Windows déjà vus |
+| `reduction-progressive.json` | Services mis en veille et avancement de la réduction progressive |
 | `journal-demarrage.csv` | Programmes ajoutés, retirés, modifiés, activés ou désactivés au démarrage |
 | `demarrage-retires\` | Raccourcis retirés du dossier Démarrage (les remettre pour annuler) |
 | `suivi.json` | Nombre de relevés de surveillance |
