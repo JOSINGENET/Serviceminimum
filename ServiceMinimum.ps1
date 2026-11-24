@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Stop'
 
 # ---------------------------------------------------------------- Emplacement de l'application
 # Lance comme script : $PSCommandPath. Compile en .exe (ps2exe) : chemin de l'executable.
-$VersionApp = '1.8.0'
+$VersionApp = '1.9.0'
 $CheminApp = $PSCommandPath
 $EstExe = $false
 if (-not $CheminApp) {
@@ -678,6 +678,11 @@ function Get-Diagnostic {
             Add-Diag $d 'Information' 'Configurations' ('Le PC est conforme à la configuration la plus économe mesurée, « {0} » ({1:N0} Mo en moyenne pour les services).' -f $meilleure.Nom, $meilleureMo) 'Rien à faire.'
         }
     }
+    # 8. Reduction progressive (version 1.9)
+    try {
+        $bilan = Get-BilanReduction
+        Add-Diag $d $bilan.Priorite 'Réduction progressive' $bilan.Constat $bilan.Conseil
+    } catch { Write-Erreur 'Diagnostic - reduction progressive' $_ }
     return $d.ToArray()
 }
 
@@ -691,6 +696,228 @@ function Update-Diagnostic {
         $gridDiag.Rows[$i].Cells['Priorite'].Style.BackColor = $CouleursTag[$niveaux[$x.Priorite]][0]
     }
     $gridDiag.ClearSelection()
+}
+
+# ---------------------------------------------------------------- Reduction progressive (version 1.9)
+# Reduit les services par paliers, du moins risque au plus risque, avec une periode d'observation
+# entre deux paliers. Un palier ne fait que cocher des lignes : c'est l'utilisateur qui applique.
+# Chaque passage Automatique -> Manuel est note (mise en veille) ; un service en veille qui redemarre
+# tout seul est "reveille" (utile a la demande), un service jamais reveille devient candidat au gel.
+$FichierReduction = Join-Path $Donnees 'reduction-progressive.json'
+$ReductionObservationJours = 3
+$ReductionLotEssai = 5
+$ReductionNbPaliers = 6
+$script:Reduction = $null
+
+function Get-Reduction {
+    if ($script:Reduction) { return $script:Reduction }
+    $r = [pscustomobject]@{ Veille = @(); DernierPalier = 0; DateDernierPalier = '' }
+    if (Test-Path -LiteralPath $FichierReduction) {
+        try {
+            $x = Get-Content -LiteralPath $FichierReduction -Raw -Encoding UTF8 | ConvertFrom-Json
+            $r.Veille = @($x.Veille | Where-Object { $_ -and $_.Name })
+            $r.DernierPalier = [int]$x.DernierPalier
+            $r.DateDernierPalier = [string]$x.DateDernierPalier
+        } catch { Write-Erreur 'Lecture reduction progressive' $_ }
+    }
+    $script:Reduction = $r
+    return $r
+}
+
+function Save-Reduction {
+    try {
+        $r = Get-Reduction
+        [pscustomobject]@{
+            Veille            = @($r.Veille)
+            DernierPalier     = [int]$r.DernierPalier
+            DateDernierPalier = [string]$r.DateDernierPalier
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $FichierReduction -Encoding UTF8
+    } catch { Write-Erreur 'Enregistrement reduction progressive' $_ }
+}
+
+function Register-ChangementReduction([string]$nom, [string]$avant, [string]$apres, [bool]$arrete) {
+    # Appele apres chaque changement de mode reussi : tient la liste des services mis en veille
+    try {
+        $r = Get-Reduction
+        $r.Veille = @($r.Veille | Where-Object { [string]$_.Name -ne $nom })
+        if ($avant -eq 'Auto' -and $apres -eq 'Manual') {
+            $actif = $false
+            $s = @($script:Inventaire | Where-Object { [string]$_.Name -eq $nom }) | Select-Object -First 1
+            if ($s -and $s.State -eq 'Running' -and -not $arrete) { $actif = $true }
+            $r.Veille = @($r.Veille) + @([pscustomobject]@{ Name = $nom; Depuis = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'); ActifAuChangement = $actif })
+        }
+        Save-Reduction
+    } catch { Write-Erreur 'Suivi reduction progressive' $_ }
+}
+
+function Get-DernierDemarrageWindows {
+    try { return (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime } catch { return $null }
+}
+
+function ConvertTo-DateReduction([string]$texte) {
+    try { return [datetime]::ParseExact($texte, 'yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture) } catch { return $null }
+}
+
+function Get-EtatVeille {
+    # Etat de chaque service mis en veille : En attente de redémarrage / En observation / Réveillé / Jamais réveillé
+    $r = Get-Reduction
+    $boot = Get-DernierDemarrageWindows
+    $maintenant = Get-Date
+    $liste = New-Object System.Collections.ArrayList
+    $garder = New-Object System.Collections.ArrayList
+    foreach ($v in @($r.Veille)) {
+        $nom = [string]$v.Name
+        $s = @($script:Inventaire | Where-Object { [string]$_.Name -eq $nom }) | Select-Object -First 1
+        # Desinstalle, remis en automatique ou gele en dehors de l'application : il sort du suivi
+        if (-not $s -or [string]$s.StartMode -ne 'Manual') { continue }
+        [void]$garder.Add($v)
+        $depuis = ConvertTo-DateReduction ([string]$v.Depuis)
+        if (-not $depuis) { $depuis = $maintenant }
+        $ref = $depuis
+        $attente = $false
+        if ([bool]$v.ActifAuChangement) {
+            # Il tournait encore au moment du changement : on ne peut rien conclure avant un redemarrage de Windows
+            if ($boot -and $boot -gt $depuis) { $ref = $boot } else { $attente = $true }
+        }
+        $etat = 'En observation'
+        $jours = [math]::Max(0, ($maintenant - $ref).TotalDays)
+        if ($attente) {
+            $etat = 'En attente de redémarrage'
+        } else {
+            $reveille = ($s.State -eq 'Running')
+            if (-not $reveille -and $script:HistoSvc) {
+                $h = $script:HistoSvc[(Get-NomStable $nom)]
+                if ($h) {
+                    $dernier = ConvertTo-DateReduction ([string]$h.DernierActif)
+                    if ($dernier -and $dernier -gt $ref.AddMinutes(1)) { $reveille = $true }
+                }
+            }
+            if ($reveille) { $etat = 'Réveillé' }
+            elseif ($jours -ge $ReductionObservationJours) { $etat = 'Jamais réveillé' }
+        }
+        [void]$liste.Add([pscustomobject]@{ Name = $nom; DisplayName = [string]$s.DisplayName; Etat = $etat; Jours = $jours; Depuis = [string]$v.Depuis; MemMo = [int]$s.MemMo })
+    }
+    if ($garder.Count -ne @($r.Veille).Count) {
+        $r.Veille = $garder.ToArray()
+        Save-Reduction
+    }
+    return $liste.ToArray()
+}
+
+function Test-ServiceSecurite($s) {
+    # Antivirus et composants de securite : jamais proposes a la reduction
+    $t = ('{0} {1} {2}' -f $s.Name, $s.DisplayName, $s.Chemin).ToLower()
+    return ($t -match 'securityhealth|windefend|defender|msmpeng|kaspersky|\\avp(ui)?\.exe|\\ksde\.exe|avast|\bavg\b|bitdefender|\beset\b|norton|sophos|malwarebytes|trend micro|mcafee')
+}
+
+function Test-ServiceLieApplication($s) {
+    # Vrai si le service appartient a une application reellement utilisee
+    # (meme dossier d'installation, ou meme paquet du Microsoft Store)
+    $u = ''
+    try { $u = [string](Get-UsageService $s) } catch { $u = '' }
+    if ($u -like 'Lié à*') { return $true }
+    $chemin = [string]$s.Chemin
+    if ($chemin -match '\\WindowsApps\\([^\\_]+)_') {
+        $paquet = $matches[1].ToLower()
+        foreach ($a in @($script:HistoApps.Values)) {
+            $cheminApp = [string]$a.Chemin
+            if ($cheminApp -match '\\WindowsApps\\([^\\_]+)_') {
+                if ($matches[1].ToLower() -eq $paquet) { return $true }
+            }
+        }
+    }
+    return $false
+}
+
+function Get-TauxActiviteService($s) {
+    # Part des releves ou le service etait actif ; -1 si l'historique est trop court
+    if (-not $script:HistoSvc) { return -1 }
+    $h = $script:HistoSvc[(Get-NomStable ([string]$s.Name))]
+    if (-not $h) { return -1 }
+    $obs = [int]$h.Observations
+    if ($obs -lt 12) { return -1 }
+    return [int][math]::Round(100 * [int]$h.Actif / $obs)
+}
+
+function New-PalierReduction([int]$num, [string]$titre, [string]$explication, $changements) {
+    return [pscustomobject]@{ Num = $num; Titre = $titre; Explication = $explication; Changements = @($changements) }
+}
+
+function New-ChangementReduction($s, [string]$cible) {
+    return [pscustomobject]@{ Name = [string]$s.Name; DisplayName = [string]$s.DisplayName; Avant = [string]$s.StartMode; Cible = $cible; MemMo = [int]$s.MemMo; State = [string]$s.State }
+}
+
+function Get-PaliersReduction {
+    # Retourne les paliers qui ont encore des services a proposer, du moins risque au plus risque
+    $paliers = New-Object System.Collections.ArrayList
+    $inv = @($script:Inventaire | Where-Object { $_.Cat -ne 'E' -and $_.Cat -ne 'U' -and $ModeFr.ContainsKey([string]$_.StartMode) -and -not (Test-ServiceSecurite $_) })
+    $auto = @($inv | Where-Object { $_.StartMode -eq 'Auto' })
+
+    # 1. Inutiles probables pas encore au mode propose par la base de connaissances
+    $c = @($inv | Where-Object { $_.Cat -eq 'I' -and $_.Cible -and $ModeFr.ContainsKey([string]$_.Cible) -and [string]$_.Cible -ne [string]$_.StartMode } | ForEach-Object { New-ChangementReduction $_ ([string]$_.Cible) })
+    if ($c.Count -gt 0) { [void]$paliers.Add((New-PalierReduction 1 'services inutiles probables' 'Services que la base de connaissances classe « inutiles probables » : télémétrie, jeux, fonctions absentes de ce poste. Risque très faible.' $c)) }
+
+    # 2. Automatiques jamais vus actifs
+    $c = @($auto | Where-Object { $_.Cat -ne 'G' -and $_.State -ne 'Running' -and (Get-TauxActiviteService $_) -eq 0 } | ForEach-Object { New-ChangementReduction $_ 'Manual' })
+    if ($c.Count -gt 0) { [void]$paliers.Add((New-PalierReduction 2 'automatiques jamais actifs' 'Services en démarrage automatique qui n''ont jamais été vus actifs dans l''historique. En veille, ils démarreront seuls si un logiciel en a besoin. Risque très faible.' $c)) }
+
+    # 3. Optionnels pour lesquels la base de connaissances propose un mode
+    $c = @($auto | Where-Object { $_.Cat -eq 'O' -and $_.Cible -and $ModeFr.ContainsKey([string]$_.Cible) -and [string]$_.Cible -ne 'Auto' } | ForEach-Object { New-ChangementReduction $_ ([string]$_.Cible) })
+    if ($c.Count -gt 0) { [void]$paliers.Add((New-PalierReduction 3 'services optionnels' 'Services optionnels de Windows (scanner, assistance IPv6, mises à jour de navigateurs...). Risque faible : ils redémarrent à la demande.' $c)) }
+
+    # 4. Tiers, non classes et optionnels peu actifs, sans lien avec une application utilisee
+    $reste = @($auto | Where-Object { @('T', 'W', 'O') -contains [string]$_.Cat -and -not (Test-ServiceLieApplication $_) })
+    $c = @($reste | Where-Object { $t = Get-TauxActiviteService $_; $t -ge 0 -and $t -lt 50 } | ForEach-Object { New-ChangementReduction $_ 'Manual' })
+    if ($c.Count -gt 0) { [void]$paliers.Add((New-PalierReduction 4 'services peu actifs' 'Services de logiciels tiers ou non classés, actifs dans moins d''un relevé sur deux et sans lien avec une application utilisée. Risque faible.' $c)) }
+
+    # 5. Essai par lots : ceux qui tournent en permanence sans lien avec une application utilisee
+    $dejaPris = @{}
+    foreach ($x in $c) { $dejaPris[$x.Name] = $true }
+    $c5 = @($reste | Where-Object { -not $dejaPris.ContainsKey([string]$_.Name) } | Sort-Object { [int]$_.MemMo } -Descending | Select-Object -First $ReductionLotEssai | ForEach-Object { New-ChangementReduction $_ 'Manual' })
+    if ($c5.Count -gt 0) { [void]$paliers.Add((New-PalierReduction 5 ('essai de mise en veille (lot de {0} au plus)' -f $ReductionLotEssai) 'Services qui tournent en permanence sans qu''aucune application utilisée ne leur soit rattachée. C''est un ESSAI : après le redémarrage, ceux qui se réveillent seuls sont utiles et restent en veille ; si une fonction manque, les remettre en Automatique (bouton « Restaurer un relevé »). Décocher ceux que vous savez nécessaires. Risque moyen.' $c5)) }
+
+    # 6. Gel : en veille depuis la fin de l'observation et jamais reveilles
+    $parNom = @{}
+    foreach ($s in $inv) { $parNom[[string]$s.Name] = $s }
+    $c = @(Get-EtatVeille | Where-Object { $_.Etat -eq 'Jamais réveillé' -and $parNom.ContainsKey([string]$_.Name) } | ForEach-Object { New-ChangementReduction $parNom[[string]$_.Name] 'Disabled' })
+    if ($c.Count -gt 0) { [void]$paliers.Add((New-PalierReduction 6 'gel des services jamais réveillés' ('Services mis en veille depuis au moins {0} jours et jamais redémarrés depuis : on peut les désactiver (gel). Réversible par « Restaurer un relevé ».' -f $ReductionObservationJours) $c)) }
+
+    return $paliers.ToArray()
+}
+
+function Get-BilanReduction {
+    # Texte de synthese pour le diagnostic et pour le bouton « Réduction progressive »
+    $etats = @(Get-EtatVeille)
+    $palier = @(Get-PaliersReduction) | Select-Object -First 1
+    $nbAuto = @($script:Inventaire | Where-Object { $_.StartMode -eq 'Auto' }).Count
+    $constat = '{0} service(s) en démarrage automatique.' -f $nbAuto
+    if ($etats.Count -gt 0) {
+        $constat += ' {0} service(s) en veille suivis :' -f $etats.Count
+        foreach ($e in @('En attente de redémarrage', 'En observation', 'Réveillé', 'Jamais réveillé')) {
+            $g = @($etats | Where-Object { $_.Etat -eq $e })
+            if ($g.Count -gt 0) { $constat += ' {0} = {1} ({2}) ;' -f $e.ToLower(), $g.Count, (Get-Noms $g 8) }
+        }
+        $constat = $constat.TrimEnd(' ', ';') + '.'
+    } else {
+        $constat += ' Aucun service en veille suivi pour l''instant.'
+    }
+    $attente = @($etats | Where-Object { $_.Etat -eq 'En attente de redémarrage' }).Count
+    $obs = @($etats | Where-Object { $_.Etat -eq 'En observation' })
+    $conseil = ''
+    if ($attente -gt 0) { $conseil += 'Redémarrer Windows (commande « Redémarrer », pas « Arrêter ») pour que la mise en veille prenne effet. ' }
+    if ($obs.Count -gt 0) {
+        $resteJ = [math]::Ceiling($ReductionObservationJours - [double](($obs | Measure-Object -Property Jours -Minimum).Minimum))
+        if ($resteJ -lt 1) { $resteJ = 1 }
+        $conseil += 'Observation en cours : encore {0} jour(s) d''usage normal avant de conclure. ' -f $resteJ
+    }
+    $priorite = 'Information'
+    if ($palier) {
+        $priorite = 'Faible'
+        $conseil += 'Palier suivant : n° {0} sur {1}, {2} ({3} service(s)). Bouton « Réduction progressive : palier suivant... ».' -f $palier.Num, $ReductionNbPaliers, $palier.Titre, $palier.Changements.Count
+    } elseif ($attente -eq 0 -and $obs.Count -eq 0) {
+        $conseil += 'Optimum atteint : il ne reste que des services essentiels, à garder, liés à vos applications ou utiles à la demande. Enregistrer cet état (onglet « Configurations enregistrées ») pour pouvoir y revenir.'
+    }
+    return [pscustomobject]@{ Priorite = $priorite; Constat = $constat; Conseil = $conseil.Trim(); Palier = $palier; Etats = $etats }
 }
 
 # ---------------------------------------------------------------- Configurations enregistrees
@@ -889,10 +1116,12 @@ function Invoke-Changements($changements, [bool]$arreter, [string]$motif) {
         } else {
             $ok++
             $resultat = 'OK'
+            $arreteOk = $false
             if ($arreter -and $c.Cible -ne 'Auto') {
-                try { Stop-Service -Name $c.Name -ErrorAction Stop }
+                try { Stop-Service -Name $c.Name -ErrorAction Stop; $arreteOk = $true }
                 catch { $resultat = 'OK (arrêt effectif au prochain redémarrage)' }
             }
+            Register-ChangementReduction ([string]$c.Name) ([string]$c.Avant) ([string]$c.Cible) $arreteOk
         }
         [pscustomobject]@{
             Date     = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
@@ -4333,6 +4562,7 @@ function Add-BoutonDiag([string]$texte) {
 $btnDiagRelancer = Add-BoutonDiag 'Relancer le diagnostic'
 $btnDiagCocher   = Add-BoutonDiag 'Cocher les services recommandés'
 $btnDiagExporter = Add-BoutonDiag 'Exporter le diagnostic'
+$btnDiagReduction = Add-BoutonDiag 'Réduction progressive : palier suivant...'
 
 $gridDiag = New-Object System.Windows.Forms.DataGridView
 $gridDiag.Dock = 'Fill'
@@ -5164,6 +5394,53 @@ $btnDiagCocher.Add_Click({
         }
     } catch {
         Write-Erreur 'Cocher recommandes' $_
+        [void][System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Service Minimum - erreur', 'OK', 'Error')
+    }
+})
+
+$btnDiagReduction.Add_Click({
+    try {
+        $bilan = Get-BilanReduction
+        $palier = $bilan.Palier
+        if (-not $palier) {
+            [void][System.Windows.Forms.MessageBox]::Show(("RÉDUCTION PROGRESSIVE`r`n`r`n{0}`r`n`r`n{1}" -f $bilan.Constat, $bilan.Conseil), 'Service Minimum - réduction progressive', 'OK', 'Information')
+            return
+        }
+        $lignes = @($palier.Changements | Select-Object -First 20 | ForEach-Object {
+            $detail = ''
+            if ($_.State -eq 'Running' -and [int]$_.MemMo -gt 0) { $detail = '  ({0} Mo)' -f $_.MemMo }
+            '  {0} : {1} -> {2}{3}' -f $_.DisplayName, $ModeFr[$_.Avant], $ModeFr[$_.Cible], $detail
+        })
+        $texte = "RÉDUCTION PROGRESSIVE - palier {0} sur {1} : {2}`r`n`r`n{3}`r`n`r`n{4}" -f $palier.Num, $ReductionNbPaliers, $palier.Titre, $palier.Explication, ($lignes -join "`r`n")
+        if ($palier.Changements.Count -gt 20) { $texte += "`r`n  ..." }
+        $enCours = @($bilan.Etats | Where-Object { $_.Etat -eq 'En attente de redémarrage' -or $_.Etat -eq 'En observation' })
+        if ($enCours.Count -gt 0) {
+            $texte += "`r`n`r`nATTENTION : {0} service(s) du palier précédent sont encore en observation ({1}). Mieux vaut attendre la fin de l'observation avant d'aller plus loin : si une fonction venait à manquer, on saurait quel palier est en cause." -f $enCours.Count, (Get-Noms $enCours 6)
+        }
+        $texte += "`r`n`r`nCocher ces {0} service(s) dans la liste du haut ?`r`nRien n'est modifié tant que « APPLIQUER LA SÉLECTION » n'est pas cliqué ; chaque ligne peut encore être décochée." -f $palier.Changements.Count
+        $rep = [System.Windows.Forms.MessageBox]::Show($texte, 'Service Minimum - réduction progressive', 'YesNo', 'Question')
+        if ($rep -ne 'Yes') { return }
+        $voulu = @{}
+        foreach ($c in $palier.Changements) { $voulu[[string]$c.Name] = [string]$c.Cible }
+        $n = 0
+        foreach ($row in $grid.Rows) {
+            $s = $row.Tag
+            if ($s -and $voulu.ContainsKey([string]$s.Name) -and -not $row.Cells['Appliquer'].ReadOnly) {
+                $row.Cells['Cible'].Value = $ModeFr[$voulu[[string]$s.Name]]
+                $row.Cells['Appliquer'].Value = $true
+                $n++
+            }
+        }
+        $r = Get-Reduction
+        $r.DernierPalier = [int]$palier.Num
+        $r.DateDernierPalier = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        Save-Reduction
+        if ($n -lt $palier.Changements.Count) {
+            [void][System.Windows.Forms.MessageBox]::Show(("{0} service(s) cochés sur {1} : les autres ne sont pas affichés ou ne sont pas modifiables. Remettre les filtres de la liste sur « Tout » puis relancer le palier." -f $n, $palier.Changements.Count), 'Service Minimum - réduction progressive', 'OK', 'Information')
+        }
+        $statut.Text = ('Palier {0} : {1} service(s) cochés. Vérifier la liste, puis « APPLIQUER LA SÉLECTION ». Ensuite, redémarrer Windows et travailler normalement {2} jours avant le palier suivant.' -f $palier.Num, $n, $ReductionObservationJours)
+    } catch {
+        Write-Erreur 'Reduction progressive' $_
         [void][System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Service Minimum - erreur', 'OK', 'Error')
     }
 })
